@@ -164,7 +164,7 @@ First launch the infrastructure application to begin the startup of the internal
 ./bin/start-dynamometer-cluster.sh \
     -hadoop_binary_path hadoop-2.7.4.tar.gz \
     -conf_path $HADOOP_HOME \
-    -fs_image_dir hdfs://dyno/fsimage \
+    -fs_image_dir hdfs:///dyno/fsimage \
     -block_list_path hdfs:///dyno/blocks 
 ```
 This demonstrates the required arguments. You can run this with the `-help` flag to see further usage information.
