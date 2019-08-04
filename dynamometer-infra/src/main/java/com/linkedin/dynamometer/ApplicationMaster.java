@@ -4,11 +4,6 @@
  */
 package com.linkedin.dynamometer;
 
-import com.google.common.base.Joiner;
-import com.google.common.base.Optional;
-import com.google.common.base.Supplier;
-import com.google.common.collect.Lists;
-import com.google.common.primitives.Ints;
 import java.io.IOException;
 import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
@@ -71,6 +66,12 @@ import org.apache.hadoop.yarn.security.AMRMTokenIdentifier;
 import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.apache.hadoop.yarn.util.Records;
 
+import com.google.common.base.Joiner;
+import com.google.common.base.Optional;
+import com.google.common.base.Supplier;
+import com.google.common.collect.Lists;
+import com.google.common.primitives.Ints;
+
 
 /**
  * The ApplicationMaster for Dynamometer. This will launch DataNodes
@@ -117,6 +118,12 @@ public class ApplicationMaster {
   private int numTotalDataNodes;
   private int numTotalDataNodeContainers;
 
+  private int numTotalNameNodes;
+  private int numTotalNameNodeContainers;
+
+  private int numTotalJournalNodes;
+  private int numTotalJournalNodeContainers;
+
   // Counter for completed datanodes (complete denotes successful or failed )
   private AtomicInteger numCompletedDataNodeContainers = new AtomicInteger();
   // Allocated datanode count so that we know how many datanodes has the RM
@@ -124,6 +131,22 @@ public class ApplicationMaster {
   private AtomicInteger numAllocatedDataNodeContainers = new AtomicInteger();
   // Count of failed datanodes
   private AtomicInteger numFailedDataNodeContainers = new AtomicInteger();
+
+  // Counter for completed namenodes (complete denotes successful or failed )
+  private AtomicInteger numCompletedNameNodeContainers = new AtomicInteger();
+  // Allocated namenode count so that we know how many namenodes has the RM
+  // allocated to us
+  private AtomicInteger numAllocatedNameNodeContainers = new AtomicInteger();
+  // Count of failed namenodes
+  private AtomicInteger numFailedNameNodeContainers = new AtomicInteger();
+
+  // Counter for completed journalnodes (complete denotes successful or failed )
+  private AtomicInteger numCompletedJournalNodeContainers = new AtomicInteger();
+  // Allocated journalnode count so that we know how many journalnode has the RM
+  // allocated to us
+  private AtomicInteger numAllocatedJournalNodeContainers = new AtomicInteger();
+  // Count of failed journalnodes
+  private AtomicInteger numFailedJournalNodeContainers = new AtomicInteger();
 
   // True iff the application has completed and is ready for cleanup
   // Once true, will never be false. This variable should not be accessed
@@ -139,6 +162,9 @@ public class ApplicationMaster {
 
   // True iff this AM should launch and manage a Namanode
   private boolean launchNameNode;
+  // True iff this AM should launch and manage a StandbyNamanode
+  private boolean launchStanbyNameNode;
+
   // The service RPC address of a remote NameNode to be contacted by the launched DataNodes
   private String namenodeServiceRpcAddress = "";
   // Directory to use for remote storage (a location on the remote FS which
@@ -148,8 +174,15 @@ public class ApplicationMaster {
   private Map<ApplicationAccessType, String> applicationAcls;
   // The container the NameNode is running within
   private volatile Container namenodeContainer;
+  // Map of the containers that the NameNodes are running within
+  private ConcurrentMap<ContainerId, Container> namenodeContainers =
+      new ConcurrentHashMap<>();
+  // Map of the containers that the JournalNodes are running within
+  private ConcurrentMap<ContainerId, Container> journalnodeContainers =
+      new ConcurrentHashMap<>();
   // Map of the containers that the DataNodes are running within
-  private ConcurrentMap<ContainerId, Container> datanodeContainers = new ConcurrentHashMap<>();
+  private ConcurrentMap<ContainerId, Container> datanodeContainers =
+      new ConcurrentHashMap<>();
 
   // Username of the user who launched this application.
   private String launchingUser;
@@ -216,12 +249,26 @@ public class ApplicationMaster {
     applicationAcls = new HashMap<>();
     applicationAcls.put(ApplicationAccessType.VIEW_APP, envs.get(DynoConstants.JOB_ACL_VIEW_ENV));
     launchingUser = envs.get(Environment.USER.name());
+
+    numTotalNameNodes =
+        Integer.parseInt(envs.get(DynoConstants.NUMTOTALNAMENODES));
+    numTotalNameNodeContainers = (int) Math.ceil(((double) numTotalNameNodes)
+        / Math.max(1, amOptions.getNameNodesPerCluster()));
+
+    numTotalJournalNodes =
+        Integer.parseInt(envs.get(DynoConstants.NUMTOTALNAMENODES));
+    numTotalJournalNodeContainers =
+        (int) Math.ceil(((double) numTotalJournalNodes)
+            / Math.max(1, amOptions.getJournalNodesPerCluster()));
+
     if (envs.containsKey(DynoConstants.REMOTE_NN_RPC_ADDR_ENV)) {
       launchNameNode = false;
-      namenodeServiceRpcAddress = envs.get(DynoConstants.REMOTE_NN_RPC_ADDR_ENV);
+      namenodeServiceRpcAddress =
+          envs.get(DynoConstants.REMOTE_NN_RPC_ADDR_ENV);
     } else {
       launchNameNode = true;
-      // namenodeServiceRpcAddress will be set in run() once properties are available
+      // namenodeServiceRpcAddress will be set in run() once properties are
+      // available
     }
 
     ContainerId containerId = ConverterUtils.toContainerId(envs.get(Environment.CONTAINER_ID.name()));
@@ -294,12 +341,25 @@ public class ApplicationMaster {
     };
 
     Optional<Properties> namenodeProperties = Optional.absent();
-    if (launchNameNode) {
-      ContainerRequest nnContainerRequest = setupContainerAskForRM(amOptions.getNameNodeMemoryMB(),
-          amOptions.getNameNodeVirtualCores(), 0, amOptions.getNameNodeNodeLabelExpression());
+    // Start journalnodes first if HA enable
+    for (int i = 0; i < numTotalJournalNodeContainers; ++i) {
+      ContainerRequest nnContainerRequest =
+          setupContainerAskForRM(amOptions.getJournalNodeMemoryMB(),
+              amOptions.getJournalNodeVirtualCores(), 0,
+              amOptions.getJournalNodeLabelExpression());
       LOG.info("Requested NameNode ask: " + nnContainerRequest.toString());
       amRMClient.addContainerRequest(nnContainerRequest);
+    }
 
+    if (launchNameNode) {
+      for (int i = 0; i < numTotalNameNodeContainers; ++i) {
+        ContainerRequest nnContainerRequest =
+            setupContainerAskForRM(amOptions.getNameNodeMemoryMB(),
+                amOptions.getNameNodeVirtualCores(), 0,
+                amOptions.getNameNodeNodeLabelExpression());
+        LOG.info("Requested NameNode ask: " + nnContainerRequest.toString());
+        amRMClient.addContainerRequest(nnContainerRequest);
+      }
       // Wait for the NN container to make its information available on the shared
       // remote file storage
       Path namenodeInfoPath = new Path(remoteStoragePath, DynoConstants.NN_INFO_FILE_NAME);
@@ -485,11 +545,35 @@ public class ApplicationMaster {
         LaunchContainerRunnable containerLauncher;
         String componentType;
         Resource rsrc = container.getResource();
-        if (launchNameNode && rsrc.getMemory() >= amOptions.getNameNodeMemoryMB()
-            && rsrc.getVirtualCores() >= amOptions.getNameNodeVirtualCores() && namenodeContainer == null) {
+        if (rsrc.getMemory() >= amOptions.getJournalNodeMemoryMB()
+            && rsrc.getVirtualCores() >= amOptions.getJournalNodeVirtualCores()
+            && numAllocatedJournalNodeContainers.get() < numTotalJournalNodes) {
+          journalnodeContainers.put(container.getId(), container);
+          componentType = "journalnode";
+          containerLauncher = new LaunchContainerRunnable(container,
+              componentType, containerListener);
+        } else if (launchNameNode
+            && rsrc.getMemory() >= amOptions.getNameNodeMemoryMB()
+            && rsrc.getVirtualCores() >= amOptions.getNameNodeVirtualCores()
+            && namenodeContainer == null) {
+          if (journalnodeContainers == null) {
+            LOG.error("Received a container with following resources suited "
+                + "for a NameNode but no JournalNode container exists: containerMem="
+                + rsrc.getMemory() + ", containerVcores="
+                + rsrc.getVirtualCores());
+            continue;
+          }
           namenodeContainer = container;
-          componentType = "NAMENODE";
-          containerLauncher = new LaunchContainerRunnable(container, true, containerListener);
+          componentType = "namenode";
+          containerLauncher = new LaunchContainerRunnable(container,
+              componentType, containerListener);
+        } else if (rsrc.getMemory() >= amOptions.getJournalNodeMemoryMB()
+            && rsrc.getVirtualCores() >= amOptions.getJournalNodeVirtualCores()
+            && numAllocatedJournalNodeContainers.get() < numTotalJournalNodes) {
+          componentType = "standbynamenode";
+          containerLauncher = new LaunchContainerRunnable(container,
+              componentType, containerListener);
+          numAllocatedJournalNodeContainers.getAndIncrement();
         } else if (rsrc.getMemory() >= amOptions.getDataNodeMemoryMB()
             && rsrc.getVirtualCores() >= amOptions.getDataNodeVirtualCores()
             && numAllocatedDataNodeContainers.get() < numTotalDataNodes) {
@@ -502,7 +586,8 @@ public class ApplicationMaster {
           numAllocatedDataNodeContainers.getAndIncrement();
           datanodeContainers.put(container.getId(), container);
           componentType = "DATANODE";
-          containerLauncher = new LaunchContainerRunnable(container, false, containerListener);
+          containerLauncher = new LaunchContainerRunnable(container,
+              componentType, containerListener);
         } else {
           LOG.warn("Received unwanted container allocation: " + container);
           nmClientAsync.stopContainerAsync(container.getId(), container.getNodeId());
@@ -552,8 +637,11 @@ public class ApplicationMaster {
     public void onContainerStopped(ContainerId containerId) {
       if (isNameNode(containerId)) {
         LOG.info("NameNode container stopped: " + containerId);
-        namenodeContainer = null;
+        namenodeContainers.remove(containerId);
         markCompleted();
+      } else if (isJournalNode(containerId)) {
+        LOG.debug("JournalNode container stopped: " + containerId);
+        journalnodeContainers.remove(containerId);
       } else if (isDataNode(containerId)) {
         LOG.debug("DataNode container stopped: " + containerId);
         datanodeContainers.remove(containerId);
@@ -576,6 +664,8 @@ public class ApplicationMaster {
         Map<String, ByteBuffer> allServiceResponse) {
       if (isNameNode(containerId)) {
         LOG.info("NameNode container started at ID " + containerId);
+      } else if (isJournalNode(containerId)) {
+        LOG.info("JournalNode container started at ID " + containerId);
       } else if (isDataNode(containerId)) {
         if (LOG.isDebugEnabled()) {
           LOG.debug("Succeeded to start DataNode Container " + containerId);
@@ -591,13 +681,20 @@ public class ApplicationMaster {
     public void onStartContainerError(ContainerId containerId, Throwable t) {
       if (isNameNode(containerId)) {
         LOG.error("Failed to start namenode container ID " + containerId, t);
-        namenodeContainer = null;
+        namenodeContainers.remove(containerId);
+        numCompletedNameNodeContainers.incrementAndGet();
+        numFailedNameNodeContainers.incrementAndGet();
         markCompleted();
       } else if (isDataNode(containerId)) {
         LOG.error("Failed to start DataNode Container " + containerId);
         datanodeContainers.remove(containerId);
         numCompletedDataNodeContainers.incrementAndGet();
         numFailedDataNodeContainers.incrementAndGet();
+      } else if (isJournalNode(containerId)) {
+        LOG.error("Failed to start DataNode Container " + containerId);
+        journalnodeContainers.remove(containerId);
+        numCompletedJournalNodeContainers.incrementAndGet();
+        numFailedJournalNodeContainers.incrementAndGet();
       } else {
         LOG.error("onStartContainerError received unknown container ID: " + containerId);
       }
@@ -613,10 +710,13 @@ public class ApplicationMaster {
     public void onStopContainerError(ContainerId containerId, Throwable t) {
       if (isNameNode(containerId)) {
         LOG.error("Failed to stop NameNode container ID " + containerId);
-        namenodeContainer = null;
+        namenodeContainers.remove(containerId);
       } else if (isDataNode(containerId)) {
         LOG.error("Failed to stop DataNode Container " + containerId);
         datanodeContainers.remove(containerId);
+      } else if (isDataNode(containerId)) {
+        LOG.error("Failed to stop JournalNode Container " + containerId);
+        journalnodeContainers.remove(containerId);
       } else {
         LOG.error("onStopContainerError received unknown containerID: " + containerId);
       }
@@ -631,7 +731,7 @@ public class ApplicationMaster {
 
     // Allocated container
     Container container;
-    boolean isNameNodeLauncher;
+    String component;
     NMCallbackHandler containerListener;
 
     /**
@@ -639,10 +739,11 @@ public class ApplicationMaster {
      * @param containerListener Callback handler of the container
      */
     public LaunchContainerRunnable(
-        Container lcontainer, boolean isNameNode, NMCallbackHandler containerListener) {
+        Container lcontainer, String component,
+        NMCallbackHandler containerListener) {
       this.container = lcontainer;
       this.containerListener = containerListener;
-      this.isNameNodeLauncher = isNameNode;
+      this.component = component;
     }
 
     @Override
@@ -653,7 +754,7 @@ public class ApplicationMaster {
      */
     public void run() {
       LOG.info("Setting up container launch context for containerid="
-          + container.getId() + ", isNameNode=" + isNameNodeLauncher);
+          + container.getId() + ", component=" + component);
       ContainerLaunchContext ctx = Records.newRecord(ContainerLaunchContext.class);
 
       // Set the environment
@@ -674,7 +775,7 @@ public class ApplicationMaster {
 
       nmClientAsync.startContainerAsync(container, ctx);
       LOG.info(String.format("Starting %s; track at: http://%s/node/containerlogs/%s/%s/",
-          isNameNodeLauncher ? "NAMENODE" : "DATANODE",
+          component,
           container.getNodeHttpAddress(), container.getId(), launchingUser));
     }
 
@@ -690,7 +791,7 @@ public class ApplicationMaster {
       addAsLocalResourceFromEnv(DynoConstants.HADOOP_BINARY, localResources, envs);
       addAsLocalResourceFromEnv(DynoConstants.VERSION, localResources, envs);
       addAsLocalResourceFromEnv(DynoConstants.DYNO_DEPENDENCIES, localResources, envs);
-      if (isNameNodeLauncher) {
+      if (component == DynoConstants.NAMENODE) {
         addAsLocalResourceFromEnv(DynoConstants.FS_IMAGE, localResources, envs);
         addAsLocalResourceFromEnv(DynoConstants.FS_IMAGE_MD5, localResources, envs);
       } else {
@@ -715,10 +816,11 @@ public class ApplicationMaster {
 
       // Set executable command
       vargs.add("./" + DynoConstants.START_SCRIPT.getResourcePath());
-      String component = isNameNodeLauncher ? "namenode" : "datanode";
-      vargs.add(component);
-      if (isNameNodeLauncher) {
+      vargs.add(this.component);
+      if (component == DynoConstants.NAMENODE
+          || component == DynoConstants.STANDBYNAMENODE) {
         vargs.add(remoteStoragePath.getFileSystem(conf).makeQualified(remoteStoragePath).toString());
+        vargs.add(String.valueOf(numTotalNameNodes));
       } else {
         vargs.add(namenodeServiceRpcAddress);
         vargs.add(String.valueOf(amOptions.getDataNodeLaunchDelaySec() < 1 ? 0 :
@@ -774,7 +876,8 @@ public class ApplicationMaster {
    * Return true iff {@code containerId} represents the NameNode container.
    */
   private boolean isNameNode(ContainerId containerId) {
-    return namenodeContainer != null && namenodeContainer.getId().equals(containerId);
+    return namenodeContainer != null
+        && namenodeContainers.containsKey(containerId);
   }
 
   /**
@@ -782,6 +885,14 @@ public class ApplicationMaster {
    */
   private boolean isDataNode(ContainerId containerId) {
     return datanodeContainers.containsKey(containerId);
+  }
+
+  /**
+   * Return true iff {@code containerId} represents a DataNode container.
+   */
+  private boolean isJournalNode(ContainerId containerId) {
+    return namenodeContainer != null
+        && journalnodeContainers.containsKey(containerId);
   }
 
   /**

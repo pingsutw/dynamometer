@@ -4,17 +4,6 @@
  */
 package com.linkedin.dynamometer;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Joiner;
-import com.google.common.base.Optional;
-import com.google.common.base.Preconditions;
-import com.google.common.base.Splitter;
-import com.google.common.base.StandardSystemProperty;
-import com.google.common.base.Supplier;
-import com.google.common.collect.Lists;
-import com.linkedin.dynamometer.workloadgenerator.audit.AuditReplayMapper;
-import com.linkedin.dynamometer.workloadgenerator.WorkloadDriver;
-
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
@@ -89,6 +78,17 @@ import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.util.Records;
 import org.junit.Assert;
 
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Joiner;
+import com.google.common.base.Optional;
+import com.google.common.base.Preconditions;
+import com.google.common.base.Splitter;
+import com.google.common.base.StandardSystemProperty;
+import com.google.common.base.Supplier;
+import com.google.common.collect.Lists;
+import com.linkedin.dynamometer.workloadgenerator.WorkloadDriver;
+import com.linkedin.dynamometer.workloadgenerator.audit.AuditReplayMapper;
+
 
 /**
  * Client for submitting a Dynamometer YARN application, and optionally, a workload MapReduce job.
@@ -152,6 +152,8 @@ public class Client extends Configured implements Tool {
   public static final String WORKLOAD_RATE_FACTOR_ARG = "workload_rate_factor";
   public static final String WORKLOAD_RATE_FACTOR_DEFAULT = "1.0";
   public static final String WORKLOAD_CONFIG_ARG = "workload_config";
+  public static final String NUMTOTALNAMENODES_DEFAULT = "1";
+  public static final String NUMTOTALJOURNALNODES_DEFAULT = "3";
 
   private static final String[] ARCHIVE_FILE_TYPES = { ".zip", ".tar", ".tgz", ".tar.gz" };
 
@@ -183,7 +185,7 @@ public class Client extends Configured implements Tool {
   // Location of NN VERSION file
   private String versionFilePath = "";
   // Service RPC address of the NameNode, if it is external
-  private String remoteNameNodeRpcAddress = "";
+  private String remoteNameNodeRpcAddress;
   // True iff the NameNode should be launched within YARN
   private boolean launchNameNode;
   // The path to the file which contains the delegation tokens to be used for the launched
@@ -200,6 +202,10 @@ public class Client extends Configured implements Tool {
   private volatile JobStatus.State workloadAppState = JobStatus.State.PREP;
   // Total number of DataNodes which will be launched.
   private int numTotalDataNodes;
+  // Total number of DataNodes which will be launched.
+  private int numTotalNameNodes;
+  // Total number of DataNodes which will be launched.
+  private int numTotalJournalNodes;
 
   // Whether or not the workload job should be launched.
   private boolean launchWorkloadJob = false;
@@ -266,7 +272,14 @@ public class Client extends Configured implements Tool {
         "Must specify at least one dependency JAR for the ApplicationMaster");
     this.dependencyJars = dependencyJars;
     opts = new Options();
-    opts.addOption(APPNAME_ARG, true, "Application Name. (default '" + APPNAME_DEFAULT + "')");
+    opts.addOption(DynoConstants.NUMTOTALNAMENODES, true,
+        "Number of Namenodes to be launched (default '("
+            + NUMTOTALNAMENODES_DEFAULT + "')");
+    opts.addOption(DynoConstants.NUMTOTALJOURNALNODES, true,
+        "Number of Namenodes to be launched (default '("
+            + NUMTOTALJOURNALNODES_DEFAULT + "')");
+    opts.addOption(APPNAME_ARG, true,
+        "Application Name. (default '(" + APPNAME_DEFAULT + "')");
     opts.addOption(QUEUE_ARG, true, "RM Queue in which this application is to be submitted (default '" +
         QUEUE_DEFAULT + "')");
     opts.addOption(TIMEOUT_ARG, true, "Application timeout in milliseconds (default " +
@@ -340,7 +353,9 @@ public class Client extends Configured implements Tool {
   public boolean init(String[] args) throws ParseException, IOException {
 
     CommandLineParser parser = new GnuParser();
-    if (parser.parse(new Options().addOption("h", "help", false, "Shows this message."), args, true).hasOption("h")) {
+    if (parser.parse(
+        new Options().addOption("h", "help", false, "Shows this message."),
+        args, true).hasOption("h")) {
       printUsage();
       return false;
     }
@@ -351,12 +366,22 @@ public class Client extends Configured implements Tool {
     yarnClient.init(getConf());
 
     LOG.info("Starting with arguments: [\"" + Joiner.on("\" \"").join(args) + "\"]");
+      numTotalNameNodes = Integer.parseInt(cliParser.getOptionValue(
+          DynoConstants.NUMTOTALNAMENODES, NUMTOTALNAMENODES_DEFAULT));
+    
+    if (numTotalNameNodes > 1) {
+      numTotalJournalNodes = Integer.parseInt(cliParser.getOptionValue(
+          DynoConstants.NUMTOTALJOURNALNODES, NUMTOTALJOURNALNODES_DEFAULT));
+    } else {
+      numTotalJournalNodes = 0;
+    }
 
     Path fsImageDir = new Path(cliParser.getOptionValue(FS_IMAGE_DIR_ARG, ""));
     versionFilePath = new Path(fsImageDir, "VERSION").toString();
     if (cliParser.hasOption(NAMENODE_SERVICERPC_ADDR_ARG)) {
       launchNameNode = false;
-      remoteNameNodeRpcAddress = cliParser.getOptionValue(NAMENODE_SERVICERPC_ADDR_ARG);
+      remoteNameNodeRpcAddress =
+          cliParser.getOptionValue(NAMENODE_SERVICERPC_ADDR_ARG);
     } else {
       launchNameNode = true;
       FileSystem localFS = FileSystem.getLocal(getConf());
@@ -566,6 +591,9 @@ public class Client extends Configured implements Tool {
     // Copy local resources to a remote FS to prepare them for localization
     // by containers. We do not need to set them as local resources here as
     // the AM does not need them.
+    env.put(DynoConstants.NUMTOTALNAMENODES, String.valueOf(numTotalNameNodes));
+    env.put(DynoConstants.NUMTOTALJOURNALNODES,
+        String.valueOf(numTotalJournalNodes));
     if (launchNameNode) {
       setupRemoteResource(infraAppId, DynoConstants.FS_IMAGE, env, fsImagePath);
       setupRemoteResource(infraAppId, DynoConstants.FS_IMAGE_MD5, env, fsImageMD5Path);

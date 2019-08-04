@@ -4,13 +4,15 @@
  */
 package com.linkedin.dynamometer;
 
+import static org.apache.hadoop.yarn.api.records.LocalResourceType.ARCHIVE;
+import static org.apache.hadoop.yarn.api.records.LocalResourceType.FILE;
+
 import java.util.regex.Pattern;
+
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.PathFilter;
-
-import static org.apache.hadoop.yarn.api.records.LocalResourceType.*;
 
 
 /**
@@ -95,5 +97,16 @@ public class DynoConstants {
   public static final String NN_SERVICERPC_PORT = "NN_SERVICERPC_PORT";
   // The port to use on the NameNode host when contacting for HTTP access
   public static final String NN_HTTP_PORT = "NN_HTTP_PORT";
+  // Total number of NameNodes which will be launched.
+  public static final String NUMTOTALNAMENODES = "numTotalNameNodes";
+  // Total number of JournalNodes which will be launched.
+  public static final String NUMTOTALJOURNALNODES = "numTotalJournalNodes";
 
+  public static final String NAMENODE = "namenode";
+
+  public static final String STANDBYNAMENODE = "standbynamenode";
+
+  public static final String DATANODE = "datanode";
+
+  public static final String JOURNALNODE = "journalnode";
 }
