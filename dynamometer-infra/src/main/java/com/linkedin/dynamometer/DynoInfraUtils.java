@@ -4,9 +4,6 @@
  */
 package com.linkedin.dynamometer;
 
-import com.google.common.base.Joiner;
-import com.google.common.base.Optional;
-import com.google.common.base.Supplier;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -22,12 +19,15 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.logging.Log;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.fs.FSDataInputStream;
+import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DFSUtilClient;
@@ -40,9 +40,14 @@ import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.Time;
 import org.apache.hadoop.yarn.YarnUncaughtExceptionHandler;
 import org.apache.hadoop.yarn.api.ApplicationConstants.Environment;
+import org.apache.hadoop.yarn.api.records.Container;
 import org.codehaus.jackson.JsonFactory;
 import org.codehaus.jackson.JsonParser;
 import org.codehaus.jackson.JsonToken;
+
+import com.google.common.base.Joiner;
+import com.google.common.base.Optional;
+import com.google.common.base.Supplier;
 
 
 /**
@@ -78,6 +83,10 @@ public class DynoInfraUtils {
   public static final String JMX_BLOCKS_TOTAL = "BlocksTotal";
   public static final String JMX_LIVE_NODE_COUNT = "NumLiveDataNodes";
   public static final String JMX_LIVE_NODES_LIST = "LiveNodes";
+  // The base port of NameNode
+  public static final int baseHttpPort = 50075;
+  public static final int baseRpcPort = 9000;
+  public static final int baseServiceRpcPort = 9020;
 
   /**
    * If a file matching {@value HADOOP_TAR_FILENAME_FORMAT} and {@code version} is
@@ -180,6 +189,48 @@ public class DynoInfraUtils {
       }
     }
     return Optional.absent();
+  }
+
+  /**
+   * Set of properties representing information about the launched NameNode.
+   * 
+   * @param sb The namenode properties.
+   * @param conf The configuration.
+   * @param log Where to log information.
+   * @throws IOException
+   */
+  static void setNameNodeProperties(Properties nameNodeProperties,
+      Configuration conf, Log log, Container container, Path nameNodeInfoPath)
+      throws IOException {
+    String hostname = container.getNodeHttpAddress().split(":")[0];
+    String nmPort = container.getNodeHttpAddress().split(":")[1];
+    Properties prop = new Properties();
+    prop.setProperty("NN_HOSTNAME", hostname);
+    // prop.setProperty("NN_RPC_PORT",
+    // String.valueOf(ServerSocketUtil.getPort(baseRpcPort, 100)));
+    // prop.setProperty("NN_SERVICERPC_PORT",
+    // String.valueOf(ServerSocketUtil.getPort(baseServiceRpcPort, 100)));
+    // prop.setProperty("NN_HTTP_PORT",
+    // String.valueOf(ServerSocketUtil.getPort(baseHttpPort, 100)));
+    // prop.setProperty("NM_HTTP_PORT", nmPort);
+    // prop.setProperty("CONTAINER_ID", container.getId().toString());
+
+    FileSystem fs = FileSystem.get(conf);
+    FSDataOutputStream output = fs.create(nameNodeInfoPath);
+    prop.store(output, null);
+  }
+
+  /**
+   * Set of properties representing information about the launched NameNode.
+   * 
+   * @param sb The namenode properties.
+   * @param conf The configuration.
+   * @param log Where to log information.
+   */
+  static void setHANameNodeProperties(StringBuilder nameNodeProperties,
+      Configuration conf, Log log, String nameNodeHostName,
+      AtomicInteger nameNodeIndex) {
+      
   }
 
   /**
